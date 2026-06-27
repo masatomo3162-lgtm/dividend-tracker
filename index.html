@@ -404,7 +404,7 @@ function populateFilters(){
 //  KPI
 // ═══════════════════════════════════════
 function calcYTD(){const yr=new Date().getFullYear().toString();return records.filter(r=>r.date.startsWith(yr)).reduce((s,r)=>s+r.net,0);}
-function calcMonthAvg(){const ytd=calcYTD();const mo=new Date().getMonth()+1;return mo>0?ytd/mo:0;}
+function calcMonthAvg(){const ytd=calcYTD();return ytd/12;}
 
 function renderKPI(){
   const yr=new Date().getFullYear().toString();
@@ -413,18 +413,15 @@ function renderKPI(){
   const totalGross=records.reduce((s,r)=>s+r.gross,0);
   const ytd=calcYTD();
   const prev=records.filter(r=>r.date.startsWith(prevYr)).reduce((s,r)=>s+r.net,0);
-  const names=[...new Set(records.map(r=>r.name).filter(Boolean))].length;
   const delta=prev>0?Math.round((ytd-prev)/prev*100):null;
   const dHTML=delta!==null?`<div class="kpi-delta">${delta>=0?'+':''}${delta}% 前年比</div>`:`<div class="kpi-sub">前年データなし</div>`;
-  const mo=new Date().getMonth()+1;
-  const avg=mo>0?Math.round(ytd/mo):0;
+  const avg=Math.round(ytd/12);
   const bondNet=records.filter(r=>isBond(r)).reduce((s,r)=>s+r.net,0);
   document.getElementById('kpiRow').innerHTML=`
     <div class="kpi"><div class="kpi-label">累計受取合計（税引後）</div><div class="kpi-val">¥${totalNet.toLocaleString()}</div><div class="kpi-sub">税引前 ¥${totalGross.toLocaleString()}</div></div>
     <div class="kpi"><div class="kpi-label">${yr}年 受取合計</div><div class="kpi-val">¥${ytd.toLocaleString()}</div>${dHTML}</div>
-    <div class="kpi"><div class="kpi-label">月平均受取（${yr}年）</div><div class="kpi-val">¥${avg.toLocaleString()}</div><div class="kpi-sub">${mo}ヶ月平均</div></div>
+    <div class="kpi"><div class="kpi-label">月平均受取（${yr}年・12ヶ月換算）</div><div class="kpi-val">¥${avg.toLocaleString()}</div></div>
     <div class="kpi"><div class="kpi-label">国債 累計利子</div><div class="kpi-val">¥${bondNet.toLocaleString()}</div><div class="kpi-sub">税引後</div></div>
-    <div class="kpi"><div class="kpi-label">銘柄・債券数</div><div class="kpi-val">${names}</div><div class="kpi-sub">件</div></div>
   `;
 }
 
@@ -606,6 +603,23 @@ function importCSV(input,mode){
   const tryParse=(text)=>{
     const lines=text.replace(/^\uFEFF/,'').split(/\r?\n/).filter(l=>l.trim());
     if(lines.length<2){msgEl.textContent='データが見つかりません';msgEl.className='msg msg-ng';return;}
+
+    // ── フォーマット検証 ──
+    // 楽天証券の資産残高CSV（■資産合計欄 / ■保有商品詳細）は対象外
+    const firstCell=parseCSVLine(lines[0])[0].replace(/^"|"$/g,'').trim();
+    if(firstCell.includes('■') || firstCell.includes('資産合計') || firstCell==='種別'){
+      msgEl.textContent='このファイルは資産残高レポートです。配当履歴CSVではないためインポートできません。楽天証券の「配当・分配金履歴」画面からダウンロードしたCSVをお使いください。';
+      msgEl.className='msg msg-ng';input.value='';return;
+    }
+    // 1行目が配当履歴ヘッダー（「入金日」含む）かチェック
+    const header0=parseCSVLine(lines[0]).map(c=>c.replace(/^"|"$/g,'').trim());
+    const isRakuten=header0[0]==='入金日' || header0.includes('入金日');
+    const isApp=header0[0]==='入金日' && header0.includes('受取金額[円/現地通貨]');
+    if(!isRakuten && !isApp){
+      msgEl.textContent='対応していないCSV形式です。楽天証券の「配当・分配金履歴」CSVか、このアプリのエクスポートCSVをご使用ください。';
+      msgEl.className='msg msg-ng';input.value='';return;
+    }
+
     const existingKeys=new Set(records.map(r=>dupKey(r)));
     let added=0,skipped=0;
     for(let i=1;i<lines.length;i++){
@@ -622,10 +636,19 @@ function importCSV(input,mode){
     msgEl.textContent=`${added}件追加・${skipped}件スキップ（重複）`;msgEl.className='msg msg-ok';
     input.value='';refreshAll();
   };
-  const r1=new FileReader();
-  r1.onload=e=>tryParse(e.target.result);
-  r1.onerror=()=>{const r2=new FileReader();r2.onload=e2=>tryParse(e2.target.result);r2.onerror=()=>{msgEl.textContent='読み込みエラー';msgEl.className='msg msg-ng';};r2.readAsText(file,'shift-jis');};
-  r1.readAsText(file,'utf-8');
+  // BOMを見てUTF-8か判定。BOMなしはShift-JISとして読む
+  // （FileReaderはCP932をUTF-8で読んでもエラーを出さず文字化けするため）
+  const bReader=new FileReader();
+  bReader.onload=e=>{
+    const buf=new Uint8Array(e.target.result.slice(0,3));
+    const hasUtf8Bom=(buf[0]===0xEF&&buf[1]===0xBB&&buf[2]===0xBF);
+    const enc=hasUtf8Bom?'utf-8':'shift-jis';
+    const r1=new FileReader();
+    r1.onload=ev=>tryParse(ev.target.result);
+    r1.onerror=()=>{msgEl.textContent='読み込みエラー';msgEl.className='msg msg-ng';};
+    r1.readAsText(file,enc);
+  };
+  bReader.readAsArrayBuffer(file.slice(0,3));
 }
 
 function clearAll(){if(!confirm('全データを削除しますか？'))return;records=[];saveData(records);refreshAll();}
