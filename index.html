@@ -117,7 +117,7 @@ textarea:focus{border-color:var(--accent);}
 <div class="app">
   <div class="header">
     <h1>配当・利子トラッカー</h1>
-    <span class="header-right" id="lastUpdated"></span>
+    <span class="header-right"><span id="lastUpdated"></span> · v1.0.1</span>
   </div>
   <div class="tabs">
     <button class="tab active" onclick="switchTab('dashboard')">ダッシュボード</button>
@@ -131,18 +131,19 @@ textarea:focus{border-color:var(--accent);}
   <!-- ダッシュボード -->
   <div id="tab-dashboard" class="section active">
     <div class="kpi-row" id="kpiRow"></div>
+    <div id="currencyNotice"></div>
     <div id="milestoneBanner"></div>
     <div class="card">
-      <div class="card-title">月別推移（全期間）</div>
+      <div class="card-title">月別推移（円建て・全期間）</div>
       <div class="legend-row" id="monthLegend"></div>
       <div class="chart-wrap tall"><canvas id="chartMonth"></canvas></div>
     </div>
     <div class="card">
-      <div class="card-title">銘柄・債券別 累計受取 上位10</div>
+      <div class="card-title">銘柄・債券別 累計受取 上位10（円建て）</div>
       <div id="top10wrap" class="chart-wrap tall"><canvas id="chartTop10"></canvas></div>
     </div>
     <div class="card">
-      <div class="card-title">年別合計</div>
+      <div class="card-title">年別合計（円建て）</div>
       <div class="chart-wrap"><canvas id="chartYear"></canvas></div>
     </div>
   </div>
@@ -306,8 +307,21 @@ textarea:focus{border-color:var(--accent);}
 //  定数・ストレージ
 // ═══════════════════════════════════════
 const SK='dividend_tracker_v1', SK_SET='dividend_tracker_settings_v1';
-function loadData(){try{const r=localStorage.getItem(SK);return r?JSON.parse(r):[]}catch{return[]}}
-function saveData(a){try{localStorage.setItem(SK,JSON.stringify(a));localStorage.setItem(SK+'_upd',new Date().toISOString());}catch{alert('保存失敗（容量不足の可能性）');}}
+function loadData(){
+  try{
+    const raw=localStorage.getItem(SK);
+    if(!raw)return[];
+    const parsed=JSON.parse(raw);
+    return Array.isArray(parsed)?parsed.map(normalizeRecord):[];
+  }catch(e){console.warn('保存データの読み込みに失敗しました',e);return[];}
+}
+function saveData(a){
+  try{
+    localStorage.setItem(SK,JSON.stringify(a));
+    localStorage.setItem(SK+'_upd',new Date().toISOString());
+    return true;
+  }catch(e){alert('保存に失敗しました。ブラウザの保存容量やプライベートモードをご確認ください。');return false;}
+}
 
 const COLS=['入金日','商品','口座','銘柄コード','銘柄','受取通貨','単価[円/現地通貨]','数量[株/口]','配当・分配金合計（税引前）[円/現地通貨]','税額合計[円/現地通貨]','受取金額[円/現地通貨]'];
 
@@ -340,11 +354,25 @@ const MS_M_DEF=[
   {val:100000,icon:'🏅', title:'月平均 10万円達成！', text:'月10万の不労所得。理容師の技術収入＋配当収入でWインカムが完成した。'},
 ];
 
-function loadSettings(){
-  try{const r=localStorage.getItem(SK_SET);if(!r)return{year:[...MS_Y_DEF],month:[...MS_M_DEF]};return JSON.parse(r);}
-  catch{return{year:[...MS_Y_DEF],month:[...MS_M_DEF]};}
+function cloneDefaultSettings(){
+  return{year:MS_Y_DEF.map(m=>({...m})),month:MS_M_DEF.map(m=>({...m}))};
 }
-function saveSettingsData(s){try{localStorage.setItem(SK_SET,JSON.stringify(s));}catch{alert('設定保存失敗');}}
+function normalizeMilestones(value,defaults){
+  if(!Array.isArray(value))return defaults.map(m=>({...m}));
+  return defaults.map((d,i)=>{
+    const src=value.find(v=>Number(v?.val)===d.val)||value[i]||{};
+    return{...d,icon:typeof src.icon==='string'?src.icon:d.icon,text:typeof src.text==='string'?src.text:d.text};
+  });
+}
+function loadSettings(){
+  try{
+    const raw=localStorage.getItem(SK_SET);
+    if(!raw)return cloneDefaultSettings();
+    const parsed=JSON.parse(raw)||{};
+    return{year:normalizeMilestones(parsed.year,MS_Y_DEF),month:normalizeMilestones(parsed.month,MS_M_DEF)};
+  }catch(e){console.warn('設定の読み込みに失敗しました',e);return cloneDefaultSettings();}
+}
+function saveSettingsData(s){try{localStorage.setItem(SK_SET,JSON.stringify(s));return true;}catch{alert('設定保存失敗');return false;}}
 
 let records=loadData();
 let settings=loadSettings();
@@ -352,10 +380,49 @@ let settings=loadSettings();
 // ═══════════════════════════════════════
 //  ユーティリティ
 // ═══════════════════════════════════════
-function pn(v){if(v===undefined||v===null||v==='')return 0;return parseFloat(String(v).replace(/,/g,''))||0;}
-function rowToObj(r){return{date:r[0]||'',type:r[1]||'',account:r[2]||'',code:r[3]||'',name:r[4]||'',currency:r[5]||'円',price:r[6]||'-',qty:pn(r[7]),gross:pn(r[8]),tax:pn(r[9]),net:pn(r[10])};}
-function dupKey(r){return`${r.date}|${r.name}|${r.net}`;}
-function isBond(r){return r.type==='個人向け国債（3年固定）'||r.type==='個人向け国債（5年固定）'||r.type==='個人向け国債（10年変動）';}
+function asText(v){return v===undefined||v===null?'':String(v);}
+function escapeHTML(v){return asText(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function pn(v){if(v===undefined||v===null||v==='')return 0;const n=Number(String(v).replace(/,/g,'').trim());return Number.isFinite(n)?n:0;}
+function normalizeDate(v){
+  const s=asText(v).trim().replace(/[.\-]/g,'/');
+  const m=s.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);if(!m)return'';
+  const y=Number(m[1]),mo=Number(m[2]),d=Number(m[3]);
+  const dt=new Date(Date.UTC(y,mo-1,d));
+  if(dt.getUTCFullYear()!==y||dt.getUTCMonth()!==mo-1||dt.getUTCDate()!==d)return'';
+  return`${String(y).padStart(4,'0')}/${String(mo).padStart(2,'0')}/${String(d).padStart(2,'0')}`;
+}
+function normalizeRecord(raw){
+  const r=Array.isArray(raw)?rowToObj(raw):(raw&&typeof raw==='object'?raw:{});
+  return{
+    date:normalizeDate(r.date)||asText(r.date).trim(),type:asText(r.type).trim(),account:asText(r.account).trim(),
+    code:asText(r.code).trim(),name:asText(r.name).trim(),currency:asText(r.currency||'円').trim()||'円',
+    price:r.price===undefined||r.price===null||r.price===''?'-':asText(r.price).trim(),qty:pn(r.qty),gross:pn(r.gross),tax:pn(r.tax),net:pn(r.net)
+  };
+}
+function rowToObj(r){return normalizeRecord({date:r[0]||'',type:r[1]||'',account:r[2]||'',code:r[3]||'',name:r[4]||'',currency:r[5]||'円',price:r[6]||'-',qty:r[7],gross:r[8],tax:r[9],net:r[10]});}
+function dupKey(r){
+  const n=normalizeRecord(r);
+  return[n.date,n.type,n.account,n.code,n.name,n.currency,n.price,n.qty,n.gross,n.tax,n.net].join('|');
+}
+function isBond(r){return['個人向け国債（3年固定）','個人向け国債（5年固定）','個人向け国債（10年変動）'].includes(asText(r?.type));}
+function currencyKey(v){
+  const c=asText(v).trim().toUpperCase();
+  if(!c||c==='円'||c==='JPY'||c==='日本円')return'JPY';
+  if(c==='米ドル'||c==='USドル'||c==='USD'||c==='US DOLLAR')return'USD';
+  return asText(v).trim()||'JPY';
+}
+function isYen(r){return currencyKey(r?.currency)==='JPY';}
+function currencyLabel(v){const c=currencyKey(v);return c==='JPY'?'円':c==='USD'?'米ドル':c;}
+function formatMoney(value,currency='円'){
+  const n=pn(value),c=currencyKey(currency);
+  if(c==='JPY')return'¥'+Math.round(n).toLocaleString('ja-JP');
+  const num=n.toLocaleString('ja-JP',{maximumFractionDigits:4});
+  if(c==='USD')return'US$'+num;
+  return`${escapeHTML(currencyLabel(c))} ${num}`;
+}
+function localDateISO(date=new Date()){
+  return`${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
+}
 
 // ═══════════════════════════════════════
 //  タブ切替
@@ -379,64 +446,82 @@ function switchSubtab(t){
 // ═══════════════════════════════════════
 //  バッジ
 // ═══════════════════════════════════════
-function badgeHTML(a,type){
-  if(isBond({type}))return`<span class="badge badge-bond">${type}</span>`;
-  if(a.includes('NISA'))return`<span class="badge badge-nisa">${a}</span>`;
-  if(a.includes('特定'))return`<span class="badge badge-toku">${a}</span>`;
-  return`<span class="badge badge-fund">${a}</span>`;
+function productBadgeHTML(type){
+  const safe=escapeHTML(type||'不明');
+  return`<span class="badge ${isBond({type})?'badge-bond':'badge-fund'}">${safe}</span>`;
+}
+function accountBadgeHTML(account){
+  const a=asText(account),safe=escapeHTML(a||'不明');
+  const cls=a.includes('NISA')?'badge-nisa':a.includes('特定')?'badge-toku':'badge-fund';
+  return`<span class="badge ${cls}">${safe}</span>`;
 }
 
 // ═══════════════════════════════════════
 //  フィルター
 // ═══════════════════════════════════════
 function populateFilters(){
-  const accs=[...new Set(records.map(r=>r.account))].sort();
-  const typs=[...new Set(records.map(r=>r.type))].sort();
-  const yrs=[...new Set(records.map(r=>r.date.slice(0,4)).filter(Boolean))].sort().reverse();
-  function fill(id,vals){const el=document.getElementById(id);if(!el)return;const cur=el.value;el.innerHTML='<option value="">すべて</option>'+vals.map(v=>`<option${v===cur?' selected':''}>${v}</option>`).join('');}
+  const accs=[...new Set(records.map(r=>asText(r.account)).filter(Boolean))].sort();
+  const typs=[...new Set(records.map(r=>asText(r.type)).filter(Boolean))].sort();
+  const yrs=[...new Set(records.map(r=>normalizeDate(r.date).slice(0,4)).filter(Boolean))].sort().reverse();
+  function fill(id,vals){
+    const el=document.getElementById(id);if(!el)return;const cur=el.value;
+    el.replaceChildren(new Option('すべて',''),...vals.map(v=>new Option(v,v,false,v===cur)));
+  }
   fill('bsAccount',accs);fill('bsType',typs);fill('hAccount',accs);fill('hYear',yrs);
   document.getElementById('recCount').textContent=records.length;
   const upd=localStorage.getItem(SK+'_upd');
-  if(upd){const d=new Date(upd);document.getElementById('lastUpdated').textContent=`最終更新 ${d.toLocaleDateString('ja-JP')}`;}
+  if(upd){const d=new Date(upd);if(!Number.isNaN(d.getTime()))document.getElementById('lastUpdated').textContent=`最終更新 ${d.toLocaleDateString('ja-JP')}`;}
 }
 
 // ═══════════════════════════════════════
 //  KPI
 // ═══════════════════════════════════════
-function calcYTD(){const yr=new Date().getFullYear().toString();return records.filter(r=>r.date.startsWith(yr)).reduce((s,r)=>s+r.net,0);}
-function calcMonthAvg(){const ytd=calcYTD();return ytd/12;}
+function calcYTD(){const yr=new Date().getFullYear().toString();return records.filter(r=>isYen(r)&&normalizeDate(r.date).startsWith(yr)).reduce((s,r)=>s+pn(r.net),0);}
+function calcMonthAvg(){return calcYTD()/12;}
 
 function renderKPI(){
-  const yr=new Date().getFullYear().toString();
-  const prevYr=(new Date().getFullYear()-1).toString();
-  const totalNet=records.reduce((s,r)=>s+r.net,0);
-  const totalGross=records.reduce((s,r)=>s+r.gross,0);
+  const now=new Date(),yr=String(now.getFullYear()),prevYr=String(now.getFullYear()-1);
+  const yenRecords=records.filter(isYen);
+  const totalNet=yenRecords.reduce((s,r)=>s+pn(r.net),0);
+  const totalGross=yenRecords.reduce((s,r)=>s+pn(r.gross),0);
   const ytd=calcYTD();
-  const prev=records.filter(r=>r.date.startsWith(prevYr)).reduce((s,r)=>s+r.net,0);
+  const cutoff=`${prevYr}/${String(now.getMonth()+1).padStart(2,'0')}/${String(now.getDate()).padStart(2,'0')}`;
+  const prev=yenRecords.filter(r=>{const d=normalizeDate(r.date);return d.startsWith(prevYr)&&d<=cutoff;}).reduce((s,r)=>s+pn(r.net),0);
   const delta=prev>0?Math.round((ytd-prev)/prev*100):null;
-  const dHTML=delta!==null?`<div class="kpi-delta">${delta>=0?'+':''}${delta}% 前年比</div>`:`<div class="kpi-sub">前年データなし</div>`;
+  const dHTML=delta!==null?`<div class="kpi-delta">${delta>=0?'+':''}${delta}% 前年同期比</div>`:`<div class="kpi-sub">前年同期データなし</div>`;
   const avg=Math.round(ytd/12);
-  const bondNet=records.filter(r=>isBond(r)).reduce((s,r)=>s+r.net,0);
+  const bondNet=yenRecords.filter(r=>isBond(r)).reduce((s,r)=>s+pn(r.net),0);
   document.getElementById('kpiRow').innerHTML=`
-    <div class="kpi"><div class="kpi-label">累計受取合計（税引後）</div><div class="kpi-val">¥${totalNet.toLocaleString()}</div><div class="kpi-sub">税引前 ¥${totalGross.toLocaleString()}</div></div>
-    <div class="kpi"><div class="kpi-label">${yr}年 受取合計</div><div class="kpi-val">¥${ytd.toLocaleString()}</div>${dHTML}</div>
-    <div class="kpi"><div class="kpi-label">月平均受取（${yr}年・12ヶ月換算）</div><div class="kpi-val">¥${avg.toLocaleString()}</div></div>
-    <div class="kpi"><div class="kpi-label">国債 累計利子</div><div class="kpi-val">¥${bondNet.toLocaleString()}</div><div class="kpi-sub">税引後</div></div>
+    <div class="kpi"><div class="kpi-label">累計受取合計（税引後）</div><div class="kpi-val">¥${Math.round(totalNet).toLocaleString()}</div><div class="kpi-sub">税引前 ¥${Math.round(totalGross).toLocaleString()}</div></div>
+    <div class="kpi"><div class="kpi-label">${yr}年 受取合計</div><div class="kpi-val">¥${Math.round(ytd).toLocaleString()}</div>${dHTML}</div>
+    <div class="kpi"><div class="kpi-label">月換算（${yr}年受取額÷12）</div><div class="kpi-val">¥${avg.toLocaleString()}</div></div>
+    <div class="kpi"><div class="kpi-label">国債 累計利子</div><div class="kpi-val">¥${Math.round(bondNet).toLocaleString()}</div><div class="kpi-sub">税引後</div></div>
   `;
+  renderCurrencyNotice();
+}
+function renderCurrencyNotice(){
+  const totals={};
+  records.filter(r=>!isYen(r)).forEach(r=>{const c=currencyKey(r.currency);totals[c]=(totals[c]||0)+pn(r.net);});
+  const entries=Object.entries(totals);
+  document.getElementById('currencyNotice').innerHTML=entries.length?`<div class="card" style="padding:11px 16px;"><div class="hint">外貨明細は為替レートなしでは正確に円換算できないため、円のKPI・マイルストーン・グラフには含めていません。外貨受取：${entries.map(([c,v])=>formatMoney(v,c)).join(' ／ ')}</div></div>`:'';
 }
 
 // ═══════════════════════════════════════
 //  マイルストーン
 // ═══════════════════════════════════════
 function renderMilestone(){
-  const ytd=calcYTD(), avg=calcMonthAvg();
-  const hitY=[...settings.year].reverse().find(m=>ytd>=m.val);
-  const hitM=[...settings.month].reverse().find(m=>avg>=m.val);
-  const nextY=settings.year.find(m=>ytd<m.val);
-  const nextM=settings.month.find(m=>avg<m.val);
+  const ytd=calcYTD(),avg=calcMonthAvg();
+  const hitY=[...settings.year].reverse().find(m=>ytd>=m.val),hitM=[...settings.month].reverse().find(m=>avg>=m.val);
+  const nextY=settings.year.find(m=>ytd<m.val),nextM=settings.month.find(m=>avg<m.val);
   let html='';
-  if(hitY){const txt=hitY.text.replace(/\{amount\}/g,'¥'+Math.round(ytd).toLocaleString());html+=`<div class="milestone-banner"><div class="milestone-icon">${hitY.icon}</div><div><div class="milestone-title">${hitY.title}</div><div class="milestone-text">${txt}</div>${nextY?`<div class="milestone-note">次：年間 ¥${nextY.val.toLocaleString()} まであと ¥${(nextY.val-ytd).toLocaleString()}</div>`:''}</div></div>`;}
-  if(hitM){const txt=hitM.text.replace(/\{amount\}/g,'¥'+Math.round(avg).toLocaleString());html+=`<div class="milestone-banner"><div class="milestone-icon">${hitM.icon}</div><div><div class="milestone-title">${hitM.title}</div><div class="milestone-text">${txt}</div>${nextM?`<div class="milestone-note">次：月平均 ¥${nextM.val.toLocaleString()} まであと ¥${Math.round(nextM.val-avg).toLocaleString()}</div>`:''}</div></div>`;}
+  if(hitY){
+    const txt=escapeHTML(hitY.text).replace(/\{amount\}/g,'¥'+Math.round(ytd).toLocaleString());
+    html+=`<div class="milestone-banner"><div class="milestone-icon">${escapeHTML(hitY.icon)}</div><div><div class="milestone-title">${escapeHTML(hitY.title)}</div><div class="milestone-text">${txt}</div>${nextY?`<div class="milestone-note">次：年間 ¥${nextY.val.toLocaleString()} まであと ¥${Math.round(nextY.val-ytd).toLocaleString()}</div>`:''}</div></div>`;
+  }
+  if(hitM){
+    const txt=escapeHTML(hitM.text).replace(/\{amount\}/g,'¥'+Math.round(avg).toLocaleString());
+    html+=`<div class="milestone-banner"><div class="milestone-icon">${escapeHTML(hitM.icon)}</div><div><div class="milestone-title">${escapeHTML(hitM.title)}</div><div class="milestone-text">${txt}</div>${nextM?`<div class="milestone-note">次：月換算 ¥${nextM.val.toLocaleString()} まであと ¥${Math.round(nextM.val-avg).toLocaleString()}</div>`:''}</div></div>`;
+  }
   document.getElementById('milestoneBanner').innerHTML=html;
 }
 
@@ -449,34 +534,47 @@ function isDark(){return window.matchMedia('(prefers-color-scheme:dark)').matche
 function gc(){return isDark()?'#2c2c2a':'#e1e0d9';}
 function tc(){return'#898781';}
 
+function setChartFallback(message){
+  ['chartMonth','chartTop10','chartYear'].forEach(id=>{
+    const canvas=document.getElementById(id);if(!canvas)return;
+    canvas.style.display='none';
+    let note=canvas.parentElement.querySelector('.chart-fallback');
+    if(!note){note=document.createElement('div');note.className='empty chart-fallback';canvas.parentElement.appendChild(note);}
+    note.textContent=message;
+  });
+}
+function clearChartFallback(){
+  document.querySelectorAll('.chart-fallback').forEach(el=>el.remove());
+  ['chartMonth','chartTop10','chartYear'].forEach(id=>{const el=document.getElementById(id);if(el)el.style.display='block';});
+}
 function renderCharts(){
-  // 月別
+  if(typeof Chart!=='function'){
+    setChartFallback('グラフライブラリを読み込めませんでした。集計表・入力・CSV機能はそのまま利用できます。');
+    return;
+  }
+  clearChartFallback();
   const bym={};
-  records.forEach(r=>{const y=r.date.slice(0,4),m=r.date.slice(5,7);if(!y||!m)return;if(!bym[y])bym[y]={};bym[y][m]=(bym[y][m]||0)+r.net;});
-  const ays=Object.keys(bym).sort();
-  const mos=['01','02','03','04','05','06','07','08','09','10','11','12'];
-  document.getElementById('monthLegend').innerHTML=ays.map((y,i)=>`<div class="legend-item"><span class="legend-dot" style="background:${PAL[i%PAL.length]};"></span>${y}年</div>`).join('');
+  records.filter(isYen).forEach(r=>{const d=normalizeDate(r.date);if(!d)return;const y=d.slice(0,4),m=d.slice(5,7);if(!bym[y])bym[y]={};bym[y][m]=(bym[y][m]||0)+pn(r.net);});
+  const ays=Object.keys(bym).sort(),mos=['01','02','03','04','05','06','07','08','09','10','11','12'];
+  document.getElementById('monthLegend').innerHTML=ays.map((y,i)=>`<div class=\"legend-item\"><span class=\"legend-dot\" style=\"background:${PAL[i%PAL.length]};\"></span>${escapeHTML(y)}年</div>`).join('');
   if(cMonth)cMonth.destroy();
   cMonth=new Chart(document.getElementById('chartMonth'),{type:'bar',
     data:{labels:mos.map(m=>m+'月'),datasets:ays.map((y,i)=>({label:y+'年',data:mos.map(m=>bym[y][m]||0),backgroundColor:PAL[i%PAL.length],borderRadius:{topLeft:3,topRight:3},maxBarThickness:24}))},
     options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>`${ctx.dataset.label} ¥${Math.round(ctx.raw).toLocaleString()}`}}},scales:{x:{grid:{display:false},ticks:{color:tc(),autoSkip:false,font:{size:11}}},y:{grid:{color:gc()},ticks:{color:tc(),callback:v=>'¥'+v.toLocaleString()}}}}
   });
 
-  // 上位10
   const bn={};
-  records.forEach(r=>{const k=r.name||'(不明)';bn[k]=(bn[k]||0)+r.net;});
+  records.filter(isYen).forEach(r=>{const k=asText(r.name)||'(不明)';bn[k]=(bn[k]||0)+pn(r.net);});
   const top10=Object.entries(bn).sort((a,b)=>b[1]-a[1]).slice(0,10);
-  const h=Math.max(280,top10.length*44+80);
-  document.getElementById('top10wrap').style.height=h+'px';
+  document.getElementById('top10wrap').style.height=Math.max(280,top10.length*44+80)+'px';
   if(cTop10)cTop10.destroy();
   cTop10=new Chart(document.getElementById('chartTop10'),{type:'bar',
     data:{labels:top10.map(e=>e[0].length>15?e[0].slice(0,15)+'…':e[0]),datasets:[{label:'受取金額',data:top10.map(e=>e[1]),backgroundColor:top10.map((_,i)=>PAL[i%PAL.length]),borderRadius:{topRight:4,bottomRight:4},borderSkipped:false}]},
     options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>`¥${Math.round(ctx.raw).toLocaleString()}`}}},scales:{x:{grid:{color:gc()},ticks:{color:tc(),callback:v=>'¥'+v.toLocaleString()}},y:{grid:{display:false},ticks:{color:tc(),font:{size:12}}}}}
   });
 
-  // 年別
   const byy={};
-  records.forEach(r=>{const y=r.date.slice(0,4);if(!y)return;byy[y]=(byy[y]||0)+r.net;});
+  records.filter(isYen).forEach(r=>{const d=normalizeDate(r.date);if(!d)return;const y=d.slice(0,4);byy[y]=(byy[y]||0)+pn(r.net);});
   const yrs=Object.keys(byy).sort();
   if(cYear)cYear.destroy();
   cYear=new Chart(document.getElementById('chartYear'),{type:'bar',
@@ -489,36 +587,34 @@ function renderCharts(){
 //  銘柄別一覧
 // ═══════════════════════════════════════
 function renderByStock(){
-  const acc=document.getElementById('bsAccount').value;
-  const typ=document.getElementById('bsType').value;
-  const srch=document.getElementById('bsSearch').value.toLowerCase();
-  const f=records.filter(r=>(!acc||r.account===acc)&&(!typ||r.type===typ)&&(!srch||r.name.toLowerCase().includes(srch)||r.code.includes(srch)));
+  const acc=document.getElementById('bsAccount').value,typ=document.getElementById('bsType').value,srch=document.getElementById('bsSearch').value.toLowerCase();
+  const f=records.filter(r=>(!acc||r.account===acc)&&(!typ||r.type===typ)&&(!srch||asText(r.name).toLowerCase().includes(srch)||asText(r.code).toLowerCase().includes(srch)));
   const agg={};
-  f.forEach(r=>{const k=(r.code||r.name)+'|'+r.type+'|'+r.account;if(!agg[k])agg[k]={code:r.code,name:r.name,type:r.type,account:r.account,count:0,gross:0,tax:0,net:0};agg[k].count++;agg[k].gross+=r.gross;agg[k].tax+=r.tax;agg[k].net+=r.net;});
-  const rows=Object.values(agg).sort((a,b)=>b.net-a.net);
-  const tN=rows.reduce((s,r)=>s+r.net,0),tG=rows.reduce((s,r)=>s+r.gross,0),tT=rows.reduce((s,r)=>s+r.tax,0);
+  f.forEach(r=>{const cur=currencyKey(r.currency),k=[r.code||r.name,r.type,r.account,cur].join('|');if(!agg[k])agg[k]={code:r.code,name:r.name,type:r.type,account:r.account,currency:r.currency||'円',count:0,gross:0,tax:0,net:0};agg[k].count++;agg[k].gross+=pn(r.gross);agg[k].tax+=pn(r.tax);agg[k].net+=pn(r.net);});
+  const rows=Object.values(agg).sort((a,b)=>currencyKey(a.currency).localeCompare(currencyKey(b.currency))||b.net-a.net);
   if(!rows.length){document.getElementById('bsBody').innerHTML=`<tr><td colspan="8" class="empty">データがありません</td></tr>`;return;}
-  document.getElementById('bsBody').innerHTML=
-    rows.map(r=>`<tr><td class="txt-muted">${r.code||'–'}</td><td>${r.name}</td><td>${badgeHTML(r.account,r.type)}</td><td>${badgeHTML(r.account,r.type).includes('bond')?'':r.account}</td><td class="txt-right">${r.count}</td><td class="txt-right txt-mono">¥${Math.round(r.gross).toLocaleString()}</td><td class="txt-right txt-muted txt-mono">¥${Math.round(r.tax).toLocaleString()}</td><td class="txt-right txt-mono" style="font-weight:600;">¥${Math.round(r.net).toLocaleString()}</td></tr>`).join('')+
-    `<tr class="total-row"><td colspan="5" style="color:var(--text-2);">合計</td><td class="txt-right txt-mono">¥${Math.round(tG).toLocaleString()}</td><td class="txt-right txt-muted txt-mono">¥${Math.round(tT).toLocaleString()}</td><td class="txt-right txt-mono">¥${Math.round(tN).toLocaleString()}</td></tr>`;
+  const totals={};rows.forEach(r=>{const c=currencyKey(r.currency);if(!totals[c])totals[c]={currency:r.currency,gross:0,tax:0,net:0};totals[c].gross+=r.gross;totals[c].tax+=r.tax;totals[c].net+=r.net;});
+  document.getElementById('bsBody').innerHTML=rows.map(r=>`<tr><td class="txt-muted">${escapeHTML(r.code||'–')}</td><td>${escapeHTML(r.name)}</td><td>${productBadgeHTML(r.type)}</td><td>${accountBadgeHTML(r.account)}</td><td class="txt-right">${r.count}</td><td class="txt-right txt-mono">${formatMoney(r.gross,r.currency)}</td><td class="txt-right txt-muted txt-mono">${formatMoney(r.tax,r.currency)}</td><td class="txt-right txt-mono" style="font-weight:600;">${formatMoney(r.net,r.currency)}</td></tr>`).join('')+
+    Object.values(totals).map(t=>`<tr class="total-row"><td colspan="5" style="color:var(--text-2);">合計（${escapeHTML(currencyLabel(t.currency))}）</td><td class="txt-right txt-mono">${formatMoney(t.gross,t.currency)}</td><td class="txt-right txt-muted txt-mono">${formatMoney(t.tax,t.currency)}</td><td class="txt-right txt-mono">${formatMoney(t.net,t.currency)}</td></tr>`).join('');
 }
 
 // ═══════════════════════════════════════
 //  明細
 // ═══════════════════════════════════════
 function renderHistory(){
-  const yr=document.getElementById('hYear').value;
-  const acc=document.getElementById('hAccount').value;
-  const srch=document.getElementById('hSearch').value.toLowerCase();
-  const f=records.filter(r=>(!yr||r.date.startsWith(yr))&&(!acc||r.account===acc)&&(!srch||r.name.toLowerCase().includes(srch))).slice().sort((a,b)=>b.date.localeCompare(a.date));
+  const yr=document.getElementById('hYear').value,acc=document.getElementById('hAccount').value,srch=document.getElementById('hSearch').value.toLowerCase();
+  const f=records.filter(r=>(!yr||normalizeDate(r.date).startsWith(yr))&&(!acc||r.account===acc)&&(!srch||asText(r.name).toLowerCase().includes(srch))).slice().sort((a,b)=>normalizeDate(b.date).localeCompare(normalizeDate(a.date)));
   if(!f.length){document.getElementById('hBody').innerHTML=`<tr><td colspan="9" class="empty">データがありません</td></tr>`;return;}
   document.getElementById('hBody').innerHTML=f.map(r=>{
-    const idx=records.indexOf(r);
-    const qtyLabel=isBond(r)?`¥${r.qty.toLocaleString()}`:r.qty.toLocaleString();
-    return`<tr><td>${r.date}</td><td class="txt-muted" style="max-width:120px;overflow:hidden;text-overflow:ellipsis;">${r.type}</td><td>${r.account}</td><td>${r.name}</td><td class="txt-right txt-muted txt-mono">${qtyLabel}</td><td class="txt-right txt-mono">¥${Math.round(r.gross).toLocaleString()}</td><td class="txt-right txt-muted txt-mono">¥${Math.round(r.tax).toLocaleString()}</td><td class="txt-right txt-mono" style="font-weight:600;">¥${Math.round(r.net).toLocaleString()}</td><td><button class="btn btn-danger btn-sm" onclick="deleteRow(${idx})">削除</button></td></tr>`;
+    const idx=records.indexOf(r),qtyLabel=isBond(r)?`¥${pn(r.qty).toLocaleString()}`:pn(r.qty).toLocaleString();
+    return`<tr><td>${escapeHTML(normalizeDate(r.date)||r.date)}</td><td class="txt-muted" style="max-width:120px;overflow:hidden;text-overflow:ellipsis;">${escapeHTML(r.type)}</td><td>${escapeHTML(r.account)}</td><td>${escapeHTML(r.name)}</td><td class="txt-right txt-muted txt-mono">${qtyLabel}</td><td class="txt-right txt-mono">${formatMoney(r.gross,r.currency)}</td><td class="txt-right txt-muted txt-mono">${formatMoney(r.tax,r.currency)}</td><td class="txt-right txt-mono" style="font-weight:600;">${formatMoney(r.net,r.currency)}</td><td><button class="btn btn-danger btn-sm" onclick="deleteRow(${idx})">削除</button></td></tr>`;
   }).join('');
 }
-function deleteRow(idx){if(!confirm('この明細を削除しますか？'))return;records.splice(idx,1);saveData(records);refreshAll();}
+function deleteRow(idx){
+  if(!Number.isInteger(idx)||idx<0||idx>=records.length)return;
+  if(!confirm('この明細を削除しますか？'))return;
+  const next=records.filter((_,i)=>i!==idx);if(!saveData(next))return;records=next;refreshAll();
+}
 
 // ═══════════════════════════════════════
 //  入力
@@ -530,128 +626,121 @@ function calcNet(p){
 }
 
 function addStock(){
-  const date=document.getElementById('s_date').value.replace(/-/g,'/');
-  const name=document.getElementById('s_name').value.trim();
-  const gross=parseFloat(document.getElementById('s_gross').value)||0;
+  const date=normalizeDate(document.getElementById('s_date').value),name=document.getElementById('s_name').value.trim();
+  const gross=Number(document.getElementById('s_gross').value),tax=Number(document.getElementById('s_tax').value||0),qty=Number(document.getElementById('s_qty').value||0);
   const msg=document.getElementById('addMsgStock');
-  if(!date||!name||!gross){msg.textContent='入金日・銘柄名・配当合計は必須';msg.className='msg msg-ng';return;}
-  const tax=parseFloat(document.getElementById('s_tax').value)||0;
-  const rec={date,type:document.getElementById('s_type').value,account:document.getElementById('s_account').value,code:document.getElementById('s_code').value,name,currency:'円',price:'-',qty:parseFloat(document.getElementById('s_qty').value)||0,gross,tax,net:Math.round(gross-tax)};
+  if(!date||!name||!Number.isFinite(gross)||gross<=0){msg.textContent='入金日・銘柄名・0円より大きい配当合計は必須です';msg.className='msg msg-ng';return;}
+  if(!Number.isFinite(tax)||tax<0||tax>gross||!Number.isFinite(qty)||qty<0){msg.textContent='数量・税額を確認してください（税額は配当合計以下）';msg.className='msg msg-ng';return;}
+  const rec=normalizeRecord({date,type:document.getElementById('s_type').value,account:document.getElementById('s_account').value,code:document.getElementById('s_code').value,name,currency:'円',price:'-',qty,gross,tax,net:gross-tax});
   if(records.some(r=>dupKey(r)===dupKey(rec))){msg.textContent='同内容の明細が存在します';msg.className='msg msg-ng';return;}
-  records.push(rec);saveData(records);
+  const next=[...records,rec];if(!saveData(next))return;records=next;
   msg.textContent='追加しました';msg.className='msg msg-ok';
-  ['s_code','s_name','s_gross','s_tax','s_net','s_qty'].forEach(id=>document.getElementById(id).value='');
-  refreshAll();
+  ['s_code','s_name','s_gross','s_tax','s_net','s_qty'].forEach(id=>document.getElementById(id).value='');refreshAll();
 }
 
 function addBond(){
-  const date=document.getElementById('b_date').value.replace(/-/g,'/');
-  const kind=document.getElementById('b_kind').value;
-  const code=document.getElementById('b_code').value.trim();
-  const face=parseFloat(document.getElementById('b_face').value)||0;
-  const gross=parseFloat(document.getElementById('b_gross').value)||0;
+  const date=normalizeDate(document.getElementById('b_date').value),kind=document.getElementById('b_kind').value,code=document.getElementById('b_code').value.trim();
+  const face=Number(document.getElementById('b_face').value||0),gross=Number(document.getElementById('b_gross').value),tax=Number(document.getElementById('b_tax').value||0);
   const msg=document.getElementById('addMsgBond');
-  if(!date||!gross){msg.textContent='利払日と利子金額は必須';msg.className='msg msg-ng';return;}
-  const tax=parseFloat(document.getElementById('b_tax').value)||0;
-  // 銘柄名は種別を使う（グラフ・集計で種別ごとに表示するため）
+  if(!date||!Number.isFinite(gross)||gross<=0){msg.textContent='利払日と0円より大きい利子金額は必須です';msg.className='msg msg-ng';return;}
+  if(!Number.isFinite(tax)||tax<0||tax>gross||!Number.isFinite(face)||face<0){msg.textContent='額面・税額を確認してください（税額は利子以下）';msg.className='msg msg-ng';return;}
   const name=kind+(code?` ${code}`:'');
-  const rec={date,type:kind,account:'特定',code,name,currency:'円',price:'-',qty:face,gross,tax,net:Math.round(gross-tax)};
+  const rec=normalizeRecord({date,type:kind,account:'特定',code,name,currency:'円',price:'-',qty:face,gross,tax,net:gross-tax});
   if(records.some(r=>dupKey(r)===dupKey(rec))){msg.textContent='同内容の明細が存在します';msg.className='msg msg-ng';return;}
-  records.push(rec);saveData(records);
+  const next=[...records,rec];if(!saveData(next))return;records=next;
   msg.textContent='追加しました';msg.className='msg msg-ok';
-  ['b_code','b_face','b_gross','b_tax','b_net'].forEach(id=>document.getElementById(id).value='');
-  refreshAll();
+  ['b_code','b_face','b_gross','b_tax','b_net'].forEach(id=>document.getElementById(id).value='');refreshAll();
 }
 
 // ═══════════════════════════════════════
 //  CSV
 // ═══════════════════════════════════════
+function csvEscape(v){
+  const s=asText(v);return /[\",\r\n]/.test(s)?`\"${s.replace(/\"/g,'\"\"')}\"`:s;
+}
 function buildCSV(){
-  const bom='\uFEFF';
-  const rows=records.map(r=>[r.date,r.type,r.account,r.code,`"${r.name}"`,r.currency,r.price,r.qty,r.gross,r.tax,r.net].join(','));
-  return bom+[COLS.join(','),...rows].join('\n');
+  const rows=records.map(r=>[r.date,r.type,r.account,r.code,r.name,r.currency,r.price,r.qty,r.gross,r.tax,r.net].map(csvEscape).join(','));
+  return'\uFEFF'+[COLS.map(csvEscape).join(','),...rows].join('\r\n');
 }
 
 async function exportCSV(usePicker){
-  const csv=buildCSV();
-  const fname='dividends_'+new Date().toISOString().slice(0,10)+'.csv';
+  const csv=buildCSV(),fname='dividends_'+localDateISO()+'.csv',blob=new Blob([csv],{type:'text/csv;charset=utf-8'});
   if(usePicker&&window.showSaveFilePicker){
     try{
       const fh=await window.showSaveFilePicker({suggestedName:fname,types:[{description:'CSV',accept:{'text/csv':['.csv']}}]});
-      const w=await fh.createWritable();
-      await w.write(csv);
-      await w.close();
-      document.getElementById('exportHint').textContent='保存しました：'+fname;
-      return;
-    }catch(e){
-      if(e.name==='AbortError')return;
-      // フォールバック
-    }
+      const w=await fh.createWritable();await w.write(blob);await w.close();document.getElementById('exportHint').textContent='保存しました：'+fname;return;
+    }catch(e){if(e.name==='AbortError')return;}
   }
-  const a=document.createElement('a');
-  a.href='data:text/csv;charset=utf-8,'+encodeURIComponent(csv);
-  a.download=fname;a.click();
+  const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=fname;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
 
-function parseCSVLine(line){const cells=[];let cur='',inQ=false;for(const c of line){if(c==='"'){inQ=!inQ;}else if(c===','&&!inQ){cells.push(cur);cur='';}else cur+=c;}cells.push(cur);return cells;}
+function parseCSV(text){
+  const rows=[];let row=[],cell='',quoted=false;
+  for(let i=0;i<text.length;i++){
+    const c=text[i];
+    if(quoted){
+      if(c==='\"'&&text[i+1]==='\"'){cell+='\"';i++;}
+      else if(c==='\"'){quoted=false;}
+      else cell+=c;
+    }else if(c==='\"'&&cell===''){quoted=true;
+    }else if(c===','){row.push(cell);cell='';
+    }else if(c==='\n'){row.push(cell);rows.push(row);row=[];cell='';
+    }else if(c!=='\r'){cell+=c;}
+  }
+  if(cell!==''||row.length){row.push(cell);rows.push(row);}
+  return rows.filter(r=>r.some(c=>c.trim()!==''));
+}
+function parseCSVLine(line){return parseCSV(line)[0]||[];}
+function decodeCSVBuffer(buffer){
+  const bytes=new Uint8Array(buffer),hasBom=bytes[0]===0xEF&&bytes[1]===0xBB&&bytes[2]===0xBF;
+  if(hasBom)return new TextDecoder('utf-8').decode(bytes).replace(/^\uFEFF/,'');
+  try{return new TextDecoder('utf-8',{fatal:true}).decode(bytes);}catch{return new TextDecoder('shift-jis').decode(bytes);}
+}
+function headerMap(header){
+  const clean=header.map(c=>c.replace(/^\uFEFF/,'').trim());
+  const find=(...names)=>clean.findIndex(h=>names.includes(h));
+  return{date:find('入金日'),type:find('商品'),account:find('口座'),code:find('銘柄コード'),name:find('銘柄','銘柄名'),currency:find('受取通貨'),price:find('単価[円/現地通貨]'),qty:find('数量[株/口]'),gross:find('配当・分配金合計（税引前）[円/現地通貨]','配当・分配金合計（税引前）'),tax:find('税額合計[円/現地通貨]','税額合計'),net:find('受取金額[円/現地通貨]','受取金額')};
+}
+function cellAt(row,i){return i>=0?asText(row[i]).trim():'';}
+function csvNumber(raw,allowEmpty=true){
+  const s=asText(raw).trim();if(s==='')return{ok:allowEmpty,value:0};
+  const n=Number(s.replace(/,/g,''));return{ok:Number.isFinite(n),value:Number.isFinite(n)?n:0};
+}
 
 function importCSV(input,mode){
   const file=input.files[0];if(!file)return;
-  const msgId=mode==='app'?'importMsgApp':'importMsg';
-  const msgEl=document.getElementById(msgId);
-  msgEl.textContent='読み込み中...';msgEl.className='msg';
-  const tryParse=(text)=>{
-    const lines=text.replace(/^\uFEFF/,'').split(/\r?\n/).filter(l=>l.trim());
-    if(lines.length<2){msgEl.textContent='データが見つかりません';msgEl.className='msg msg-ng';return;}
-
-    // ── フォーマット検証 ──
-    // 楽天証券の資産残高CSV（■資産合計欄 / ■保有商品詳細）は対象外
-    const firstCell=parseCSVLine(lines[0])[0].replace(/^"|"$/g,'').trim();
-    if(firstCell.includes('■') || firstCell.includes('資産合計') || firstCell==='種別'){
-      msgEl.textContent='このファイルは資産残高レポートです。配当履歴CSVではないためインポートできません。楽天証券の「配当・分配金履歴」画面からダウンロードしたCSVをお使いください。';
-      msgEl.className='msg msg-ng';input.value='';return;
-    }
-    // 1行目が配当履歴ヘッダー（「入金日」含む）かチェック
-    const header0=parseCSVLine(lines[0]).map(c=>c.replace(/^"|"$/g,'').trim());
-    const isRakuten=header0[0]==='入金日' || header0.includes('入金日');
-    const isApp=header0[0]==='入金日' && header0.includes('受取金額[円/現地通貨]');
-    if(!isRakuten && !isApp){
-      msgEl.textContent='対応していないCSV形式です。楽天証券の「配当・分配金履歴」CSVか、このアプリのエクスポートCSVをご使用ください。';
-      msgEl.className='msg msg-ng';input.value='';return;
-    }
-
-    const existingKeys=new Set(records.map(r=>dupKey(r)));
-    let added=0,skipped=0;
-    for(let i=1;i<lines.length;i++){
-      const cells=parseCSVLine(lines[i]);
-      if(cells.length<4)continue;
-      const cleaned=cells.map(c=>c.trim().replace(/^"|"$/g,''));
-      const rec=rowToObj(cleaned);
-      if(!rec.date||!rec.name)continue;
-      const key=dupKey(rec);
-      if(existingKeys.has(key)){skipped++;continue;}
-      records.push(rec);existingKeys.add(key);added++;
-    }
-    saveData(records);
-    msgEl.textContent=`${added}件追加・${skipped}件スキップ（重複）`;msgEl.className='msg msg-ok';
-    input.value='';refreshAll();
+  const msgEl=document.getElementById(mode==='app'?'importMsgApp':'importMsg');msgEl.textContent='読み込み中...';msgEl.className='msg';
+  const reader=new FileReader();
+  reader.onload=e=>{
+    try{
+      const rows=parseCSV(decodeCSVBuffer(e.target.result));
+      if(rows.length<2)throw new Error('データが見つかりません');
+      const first=asText(rows[0][0]).replace(/^\uFEFF/,'').trim();
+      if(first.includes('■')||first.includes('資産合計')||first==='種別')throw new Error('このファイルは資産残高レポートです。楽天証券の「配当・分配金履歴」CSVをご使用ください。');
+      const map=headerMap(rows[0]);
+      if(map.date<0||map.name<0||(map.net<0&&map.gross<0))throw new Error('対応していないCSV形式です。配当・分配金履歴CSVか、このアプリのエクスポートCSVをご使用ください。');
+      const existing=new Set(records.map(dupKey)),next=[...records];let added=0,duplicates=0,invalid=0;
+      for(const row of rows.slice(1)){
+        const date=normalizeDate(cellAt(row,map.date)),name=cellAt(row,map.name);if(!date||!name){invalid++;continue;}
+        const g=csvNumber(cellAt(row,map.gross)),t=csvNumber(cellAt(row,map.tax)),q=csvNumber(cellAt(row,map.qty));
+        const netRaw=cellAt(row,map.net),n=csvNumber(netRaw);
+        if(!g.ok||!t.ok||!q.ok||!n.ok){invalid++;continue;}
+        const gross=g.value,tax=t.value,net=netRaw===''?gross-tax:n.value;
+        const rec=normalizeRecord({date,type:cellAt(row,map.type),account:cellAt(row,map.account),code:cellAt(row,map.code),name,currency:cellAt(row,map.currency)||'円',price:cellAt(row,map.price)||'-',qty:q.value,gross,tax,net});
+        const key=dupKey(rec);if(existing.has(key)){duplicates++;continue;}existing.add(key);next.push(rec);added++;
+      }
+      if(!saveData(next)){msgEl.textContent='保存できなかったため、インポートを中止しました';msgEl.className='msg msg-ng';return;}
+      records=next;msgEl.textContent=`${added}件追加・${duplicates}件重複スキップ${invalid?`・${invalid}件不正行スキップ`:''}`;msgEl.className='msg msg-ok';input.value='';refreshAll();
+    }catch(err){msgEl.textContent=err.message||'CSVの読み込みに失敗しました';msgEl.className='msg msg-ng';input.value='';}
   };
-  // BOMを見てUTF-8か判定。BOMなしはShift-JISとして読む
-  // （FileReaderはCP932をUTF-8で読んでもエラーを出さず文字化けするため）
-  const bReader=new FileReader();
-  bReader.onload=e=>{
-    const buf=new Uint8Array(e.target.result.slice(0,3));
-    const hasUtf8Bom=(buf[0]===0xEF&&buf[1]===0xBB&&buf[2]===0xBF);
-    const enc=hasUtf8Bom?'utf-8':'shift-jis';
-    const r1=new FileReader();
-    r1.onload=ev=>tryParse(ev.target.result);
-    r1.onerror=()=>{msgEl.textContent='読み込みエラー';msgEl.className='msg msg-ng';};
-    r1.readAsText(file,enc);
-  };
-  bReader.readAsArrayBuffer(file.slice(0,3));
+  reader.onerror=()=>{msgEl.textContent='ファイルの読み込みに失敗しました';msgEl.className='msg msg-ng';input.value='';};
+  reader.readAsArrayBuffer(file);
 }
 
-function clearAll(){if(!confirm('全データを削除しますか？'))return;records=[];saveData(records);refreshAll();}
+function clearAll(){
+  if(!confirm('全データを削除しますか？この操作は元に戻せません。'))return;
+  if(!saveData([]))return;records=[];refreshAll();
+}
 
 // ═══════════════════════════════════════
 //  設定
@@ -659,28 +748,23 @@ function clearAll(){if(!confirm('全データを削除しますか？'))return;r
 function renderSettingsForm(){
   function build(arr,cid){
     document.getElementById(cid).innerHTML=arr.map((m,i)=>`
-      <div class="ms-row">
-        <div class="ms-label">¥${m.val.toLocaleString()}</div>
-        <div style="display:flex;gap:6px;align-items:start;">
-          <input type="text" style="width:36px;" value="${m.icon}" id="ms_i_${cid}_${i}" maxlength="4">
-          <textarea rows="2" style="flex:1;font-size:12px;" id="ms_t_${cid}_${i}">${m.text}</textarea>
-        </div>
-      </div>`).join('');
+      <div class="ms-row"><div class="ms-label">¥${m.val.toLocaleString()}</div><div style="display:flex;gap:6px;align-items:start;">
+        <input type="text" style="width:36px;" value="${escapeHTML(m.icon)}" id="ms_i_${cid}_${i}" maxlength="4">
+        <textarea rows="2" style="flex:1;font-size:12px;" id="ms_t_${cid}_${i}">${escapeHTML(m.text)}</textarea>
+      </div></div>`).join('');
   }
-  build(settings.year,'msYearSettings');
-  build(settings.month,'msMonthSettings');
+  build(settings.year,'msYearSettings');build(settings.month,'msMonthSettings');
 }
 function saveSettings(){
   function read(arr,cid){return arr.map((m,i)=>({...m,icon:document.getElementById(`ms_i_${cid}_${i}`)?.value||m.icon,text:document.getElementById(`ms_t_${cid}_${i}`)?.value||m.text}));}
-  settings.year=read(settings.year,'msYearSettings');
-  settings.month=read(settings.month,'msMonthSettings');
-  saveSettingsData(settings);
+  const next={year:read(settings.year,'msYearSettings'),month:read(settings.month,'msMonthSettings')};
+  if(!saveSettingsData(next))return;settings=next;
   const msg=document.getElementById('settingsMsg');msg.textContent='保存しました';msg.className='msg msg-ok';setTimeout(()=>msg.textContent='',2000);
   renderMilestone();
 }
 function resetSettings(){
   if(!confirm('デフォルトに戻しますか？'))return;
-  settings={year:[...MS_Y_DEF],month:[...MS_M_DEF]};saveSettingsData(settings);renderSettingsForm();renderMilestone();
+  const next=cloneDefaultSettings();if(!saveSettingsData(next))return;settings=next;renderSettingsForm();renderMilestone();
   const msg=document.getElementById('settingsMsg');msg.textContent='リセットしました';msg.className='msg msg-ok';setTimeout(()=>msg.textContent='',2000);
 }
 
@@ -703,10 +787,12 @@ if(!window.showSaveFilePicker){
 }
 
 // ─── 起動 ───
+const today=localDateISO();
+['s_date','b_date'].forEach(id=>{const el=document.getElementById(id);if(el&&!el.value)el.value=today;});
 populateFilters();renderKPI();renderMilestone();renderCharts();renderByStock();
-window.matchMedia('(prefers-color-scheme:dark)').addEventListener('change',()=>{
-  if(document.getElementById('tab-dashboard').classList.contains('active'))renderCharts();
-});
+const darkMedia=window.matchMedia('(prefers-color-scheme:dark)');
+const onThemeChange=()=>{if(document.getElementById('tab-dashboard').classList.contains('active'))renderCharts();};
+if(darkMedia.addEventListener)darkMedia.addEventListener('change',onThemeChange);else if(darkMedia.addListener)darkMedia.addListener(onThemeChange);
 </script>
 </body>
 </html>
